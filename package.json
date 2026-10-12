@@ -1,0 +1,19 @@
+{
+  "name": "alice-gemini-skill",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Fast & intelligent Yandex Alice skill powered by Google Gemini with native search and voice optimization",
+  "scripts": {
+    "test": "node --test tests/api.test.js",
+    "start": "node --watch api/index.js"
+  },
+  "keywords": [
+    "yandex-alice",
+    "gemini",
+    "yandex-dialogs",
+    "voice-assistant",
+    "vercel"
+  ],
+  "license": "MIT"
+}
