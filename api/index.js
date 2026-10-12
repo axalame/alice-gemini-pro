@@ -210,7 +210,9 @@ async function askGemini(text, history, timeoutMs) {
       console.warn(`Model ${model} returned HTTP ${status}:`, data?.error?.message);
 
       if (status === 400 || status === 401 || status === 403) {
-        throw new Error("GEMINI_KEY_REJECTED");
+        const err = new Error("GEMINI_KEY_REJECTED");
+        err.details = data?.error?.message;
+        throw err;
       }
       if (status === 429) {
         lastError = new Error("GEMINI_QUOTA");
@@ -234,7 +236,7 @@ function errorForUser(error) {
     case "MISSING_GEMINI_KEY":
       return "В настройках навыка не указан GEMINI_API_KEY. Пожалуйста, добавьте его в переменных окружения Vercel.";
     case "GEMINI_KEY_REJECTED":
-      return "Не удалось авторизоваться в Google Gemini. Проверьте правильность API-ключа в настройках Vercel.";
+      return `Ошибка Google Gemini: ${error?.details || "проверьте правильность API-ключа"}.`;
     case "GEMINI_QUOTA":
       return "Сейчас превышен минутный лимит запросов к нейросети. Подождите пару секунд и повторите вопрос.";
     case "GEMINI_BLOCKED":
