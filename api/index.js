@@ -171,7 +171,10 @@ async function askGemini(text, history, timeoutMs) {
     contents,
     generationConfig: {
       temperature: 0.7,
-      maxOutputTokens: 350
+      maxOutputTokens: 350,
+      thinkingConfig: {
+        thinkingLevel: "minimal"
+      }
     }
   };
 
@@ -253,7 +256,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       service: "alice-gemini-skill",
-      version: "2.1.0",
+      version: "2.2.0",
       status: "ready",
       message: "Webhook is active. Configure Yandex Dialogs to send POST requests to this URL."
     });
