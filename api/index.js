@@ -1,4 +1,4 @@
-const DEFAULT_MODEL = "gemini-3.5-flash";
+const DEFAULT_MODEL = "gemini-3-flash-preview";
 const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_CHARS = 2400;
 const MAX_ALICE_TEXT = 1000;
@@ -156,7 +156,7 @@ async function askGemini(text, history, timeoutMs, overrideModel) {
   const preferredModel = String(overrideModel || process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
   const modelsToTry = [
     preferredModel,
-    preferredModel !== "gemini-3.5-flash-lite" ? "gemini-3.5-flash-lite" : "gemini-3.5-flash"
+    preferredModel !== "gemini-3.5-flash" ? "gemini-3.5-flash" : "gemini-3-flash-preview"
   ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
   const systemPrompt = process.env.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
@@ -253,7 +253,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       service: "alice-gemini-skill",
-      version: "2.4.0",
+      version: "3.0.0",
       status: "ready",
       message: "Webhook is active. Configure Yandex Dialogs to send POST requests to this URL."
     });
