@@ -2,8 +2,8 @@ const DEFAULT_MODEL = "gemini-3.5-flash";
 const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_CHARS = 2400;
 const MAX_ALICE_TEXT = 1000;
-const TOTAL_BUDGET_MS = 4100;
-const GEMINI_TIMEOUT_MS = 3500;
+const TOTAL_BUDGET_MS = 4300;
+const GEMINI_TIMEOUT_MS = 3800;
 
 function isSearchIntent(text) {
   return /\b(latest|today|current|news|weather|price|exchange rate|recent|search|look up)\b|сегодня|сейчас|последн|новост|погод|курс валют|найди|поищи|актуальн|сколько стоит|свежие данные|счет матча|кто выиграл/i.test(text);
@@ -171,10 +171,7 @@ async function askGemini(text, history, timeoutMs) {
     contents,
     generationConfig: {
       temperature: 0.7,
-      maxOutputTokens: 350,
-      thinkingConfig: {
-        thinkingLevel: "minimal"
-      }
+      maxOutputTokens: 250
     }
   };
 
@@ -194,7 +191,7 @@ async function askGemini(text, history, timeoutMs) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(requestBody)
         },
-        Math.min(remainingTime, 2800)
+        Math.min(remainingTime, 3200)
       );
 
       if (response.ok) {
@@ -209,10 +206,8 @@ async function askGemini(text, history, timeoutMs) {
       const status = Number(response.status);
       console.warn(`Model ${model} returned HTTP ${status}:`, data?.error?.message);
 
-      if (status === 400 || status === 401 || status === 403) {
-        const err = new Error("GEMINI_KEY_REJECTED");
-        err.details = data?.error?.message;
-        throw err;
+      if (status === 401 || status === 403) {
+        throw new Error("GEMINI_KEY_REJECTED");
       }
       if (status === 429) {
         lastError = new Error("GEMINI_QUOTA");
@@ -258,7 +253,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       service: "alice-gemini-skill",
-      version: "2.2.0",
+      version: "2.3.0",
       status: "ready",
       message: "Webhook is active. Configure Yandex Dialogs to send POST requests to this URL."
     });
