@@ -2,8 +2,12 @@ const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_CHARS = 2400;
 const MAX_ALICE_TEXT = 1000;
-const TOTAL_BUDGET_MS = 3800;
-const GEMINI_TIMEOUT_MS = 2800;
+const TOTAL_BUDGET_MS = 4100;
+const GEMINI_TIMEOUT_MS = 3500;
+
+function isSearchIntent(text) {
+  return /\b(latest|today|current|news|weather|price|exchange rate|recent|search|look up)\b|сегодня|сейчас|последн|новост|погод|курс валют|найди|поищи|актуальн|сколько стоит|свежие данные|счет матча|кто выиграл/i.test(text);
+}
 
 const DEFAULT_SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
@@ -111,7 +115,7 @@ async function askGemini(text, history, timeoutMs) {
 
   const model = String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
   const systemPrompt = process.env.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
-  const enableSearch = process.env.ENABLE_GOOGLE_SEARCH !== "false";
+  const enableSearch = process.env.ENABLE_GOOGLE_SEARCH === "true" && isSearchIntent(text);
 
   const contents = safeHistory(history).map(item => ({
     role: item.role,
@@ -181,9 +185,9 @@ async function askGemini(text, history, timeoutMs) {
 function errorForUser(error) {
   switch (error?.message) {
     case "MISSING_GEMINI_KEY":
-      return "В настройках навыка не указан GEMINI_API_KEY. Добавьте его в Environment Variables в Vercel.";
+      return "В настройках навыка не указан GEMINI_API_KEY. Пожалуйста, добавьте его в переменных окружения Vercel.";
     case "GEMINI_KEY_REJECTED":
-      return "Google Gemini отклонил API-ключ. Проверьте правильность ключа в Vercel.";
+      return "Не удалось авторизоваться в Google Gemini. Проверьте правильность API-ключа в настройках Vercel.";
     case "GEMINI_QUOTA":
       return "Сейчас превышен минутный лимит запросов к нейросети. Подождите пару секунд и повторите вопрос.";
     case "GEMINI_BLOCKED":
@@ -277,5 +281,6 @@ export {
   safeHistory,
   aliceResponse,
   isExitIntent,
-  isHelpIntent
+  isHelpIntent,
+  isSearchIntent
 };
