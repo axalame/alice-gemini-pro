@@ -1,4 +1,4 @@
-const DEFAULT_MODEL = "gemini-3.5-flash-lite";
+const DEFAULT_MODEL = "gemini-3.5-flash";
 const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_CHARS = 2400;
 const MAX_ALICE_TEXT = 1000;
@@ -28,30 +28,48 @@ const DEFAULT_BUTTONS = [
   { title: "Хватит", hide: true }
 ];
 
+/**
+ * Проверка команд завершения диалога
+ */
 function isExitIntent(text) {
   return /^(стоп|хватит|пока|до свидания|закройся|выход|отмена|отбой|завершить)$/i.test(text.trim());
 }
 
+/**
+ * Проверка команд помощи
+ */
 function isHelpIntent(text) {
   return /^(помощь|что ты умеешь|справка|правила|как пользоваться)$/i.test(text.trim());
 }
 
+/**
+ * Очистка текста от Markdown, URL и спецсимволов для идеального озвучивания Алисой
+ */
 function cleanVoiceText(value) {
   let text = String(value ?? "")
+    // Удаляем URL-ссылки, сохраняя знаки препинания после них
     .replace(/https?:\/\/[^\s]+?(?=[.,!?;:]*(\s|$))/gi, "")
+    // Удаляем markdown жирный/курсив (**текст**, *текст*, __текст__)
     .replace(/(\*\*|__)(.*?)\1/g, "$2")
     .replace(/(\*|_)(.*?)\1/g, "$2")
+    // Удаляем символы заголовков #, маркеров списков и цитат
     .replace(/(^|\s)[#*>-]+[ \t]*/g, "$1")
+    // Удаляем обратные кавычки кода
     .replace(/`{1,3}[^`]*`{1,3}/g, "")
+    // Удаляем эмодзи и спецсимволы
     .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, "")
+    // Убираем лишние пробелы перед знаками препинания
     .replace(/\s+([.,!?;:])/g, "$1")
+    // Нормализуем пробелы и переводы строк
     .replace(/[\r\n\t]+/g, " ")
     .replace(/\s{2,}/g, " ")
     .trim();
 
   if (!text) return "Не удалось сформировать ответ. Попробуйте спросить иначе.";
+
   if (text.length <= MAX_ALICE_TEXT) return text;
 
+  // Если текст длиннее лимита, аккуратно режем по концу предложения
   const candidate = text.slice(0, MAX_ALICE_TEXT - 1);
   const sentenceEnd = Math.max(
     candidate.lastIndexOf(". "),
@@ -64,12 +82,16 @@ function cleanVoiceText(value) {
   return (lastSpace > 200 ? candidate.slice(0, lastSpace) : candidate).trim() + "…";
 }
 
+/**
+ * Безопасное хранение истории (строго защищает от лимита 10 КБ в session_state)
+ */
 function safeHistory(history) {
   if (!Array.isArray(history)) return [];
   const valid = history
     .filter(item => item && (item.role === "user" || item.role === "model") && typeof item.text === "string")
     .slice(-MAX_HISTORY_MESSAGES);
 
+  // Контролируем общий размер символов
   let totalChars = 0;
   const result = [];
   for (let i = valid.length - 1; i >= 0; i--) {
@@ -82,6 +104,9 @@ function safeHistory(history) {
   return result;
 }
 
+/**
+ * Формирование ответа по протоколу Яндекс Диалогов
+ */
 function aliceResponse(text, endSession = false, history = [], buttons = DEFAULT_BUTTONS) {
   const clean = cleanVoiceText(text);
   return {
@@ -96,6 +121,9 @@ function aliceResponse(text, endSession = false, history = [], buttons = DEFAULT
   };
 }
 
+/**
+ * Безопасный запрос с таймаутом
+ */
 async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.max(150, timeoutMs));
@@ -108,6 +136,9 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
+/**
+ * Запрос к Google Gemini с поддержкой Google Search Grounding и автоматическим фолбэком
+ */
 async function askGemini(text, history, timeoutMs) {
   let rawKey = process.env.GEMINI_API_KEY || process.env.gemini || process.env.GEMINI_KEY || "";
   const key = String(rawKey).replace(/^['"]|['"]$/g, "").trim();
@@ -116,6 +147,7 @@ async function askGemini(text, history, timeoutMs) {
 
   const model = String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
   const systemPrompt = process.env.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
+  // Поиск в Google включаем ТОЛЬКО если есть поисковый интент (новости, погода, курсы и т.д.)
   const enableSearch = process.env.ENABLE_GOOGLE_SEARCH === "true" && isSearchIntent(text);
 
   const contents = safeHistory(history).map(item => ({
@@ -136,6 +168,7 @@ async function askGemini(text, history, timeoutMs) {
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
 
+  // Первая попытка: с поиском (если включен)
   let { response, data } = await fetchWithTimeout(
     url,
     {
@@ -146,6 +179,7 @@ async function askGemini(text, history, timeoutMs) {
     timeoutMs
   );
 
+  // Если поиск отклонен из-за квоты 429 или не поддерживается, делаем мгновенный ретрай без tools
   if (!response.ok && enableSearch && response.status === 429) {
     console.warn("Search grounding quota reached; retrying without tools.");
     const retry = await fetchWithTimeout(
@@ -183,6 +217,9 @@ async function askGemini(text, history, timeoutMs) {
   return answer;
 }
 
+/**
+ * Человекопонятные сообщения об ошибках
+ */
 function errorForUser(error) {
   switch (error?.message) {
     case "MISSING_GEMINI_KEY":
@@ -201,7 +238,11 @@ function errorForUser(error) {
   }
 }
 
+/**
+ * Основной обработчик вебхука Яндекс Диалогов
+ */
 export default async function handler(req, res) {
+  // Healthcheck для Vercel и браузера
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
@@ -217,6 +258,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
+  // Опциональная защита токеном в query (?token=secret)
   if (process.env.WEBHOOK_SECRET) {
     const urlToken = req.query?.token;
     if (urlToken !== process.env.WEBHOOK_SECRET) {
@@ -231,6 +273,7 @@ export default async function handler(req, res) {
   const text = String(body?.request?.command || body?.request?.original_utterance || "").trim();
   const oldHistory = safeHistory(body?.state?.session?.history);
 
+  // 1. Первый запуск (Приветствие)
   if (!text) {
     return res.status(200).json(aliceResponse(
       "Привет! Я умный голосовой помощник на базе Google Gemini. Могу отвечать на сложные вопросы или искать свежие данные в интернете. О чём хотите узнать?",
@@ -239,6 +282,7 @@ export default async function handler(req, res) {
     ));
   }
 
+  // 2. Быстрый перехват команд завершения
   if (isExitIntent(text)) {
     return res.status(200).json(aliceResponse(
       "До связи! Если снова понадобится помощь — зовите.",
@@ -247,6 +291,7 @@ export default async function handler(req, res) {
     ));
   }
 
+  // 3. Быстрый перехват команд помощи
   if (isHelpIntent(text)) {
     return res.status(200).json(aliceResponse(
       "Я умею отвечать на вопросы, решать логические задачи, помогать с советами и находить актуальные новости. Просто спросите меня голосом, как обычного собеседника.",
@@ -255,6 +300,7 @@ export default async function handler(req, res) {
     ));
   }
 
+  // 4. Запрос к Gemini
   try {
     const answer = await askGemini(
       text,
