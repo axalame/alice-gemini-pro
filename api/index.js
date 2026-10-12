@@ -279,6 +279,17 @@ export default async function handler(req, res) {
   const text = String(body?.request?.command || body?.request?.original_utterance || "").trim();
   const oldHistory = safeHistory(body?.state?.session?.history);
 
+  // 0. Debug режим для диагностики задержки
+  if (body?.debug) {
+    const t0 = Date.now();
+    try {
+      const answer = await askGemini(text || "Тест", oldHistory, 4000);
+      return res.status(200).json({ ok: true, duration: Date.now() - t0, answer });
+    } catch (err) {
+      return res.status(200).json({ ok: false, duration: Date.now() - t0, error: err.message, details: err.details });
+    }
+  }
+
   // 1. Первый запуск (Приветствие)
   if (!text) {
     return res.status(200).json(aliceResponse(
