@@ -147,13 +147,13 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 /**
  * Запрос к Google Gemini с автоматическим переключением моделей (fallback) при перегрузке или лимитах 429/503
  */
-async function askGemini(text, history, timeoutMs) {
+async function askGemini(text, history, timeoutMs, overrideModel) {
   let rawKey = process.env.GEMINI_API_KEY || process.env.gemini || process.env.GEMINI_KEY || "";
   const key = String(rawKey).replace(/^['"]|['"]$/g, "").trim();
   if (!key) throw new Error("MISSING_GEMINI_KEY");
   if (timeoutMs < 300) throw new Error("TIME_BUDGET_EXHAUSTED");
 
-  const preferredModel = String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
+  const preferredModel = String(overrideModel || process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
   const modelsToTry = [
     preferredModel,
     preferredModel !== "gemini-3.5-flash-lite" ? "gemini-3.5-flash-lite" : "gemini-3.5-flash"
@@ -283,7 +283,7 @@ export default async function handler(req, res) {
   if (body?.debug) {
     const t0 = Date.now();
     try {
-      const answer = await askGemini(text || "Тест", oldHistory, 4000);
+      const answer = await askGemini(text || "Тест", oldHistory, 4000, body?.model);
       return res.status(200).json({ ok: true, duration: Date.now() - t0, answer });
     } catch (err) {
       return res.status(200).json({ ok: false, duration: Date.now() - t0, error: err.message, details: err.details });
@@ -322,7 +322,8 @@ export default async function handler(req, res) {
     const answer = await askGemini(
       text,
       oldHistory,
-      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingBudget() - 250))
+      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingBudget() - 250)),
+      body?.model
     );
 
     const history = [
