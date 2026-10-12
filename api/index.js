@@ -144,7 +144,7 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 }
 
 /**
- * Запрос к Google Gemini с поддержкой Google Search Grounding и автоматическим фолбэком
+ * Запрос к Google Gemini с автоматическим переключением моделей (fallback) при перегрузке или лимитах 429/503
  */
 async function askGemini(text, history, timeoutMs) {
   let rawKey = process.env.GEMINI_API_KEY || process.env.gemini || process.env.GEMINI_KEY || "";
@@ -152,76 +152,75 @@ async function askGemini(text, history, timeoutMs) {
   if (!key) throw new Error("MISSING_GEMINI_KEY");
   if (timeoutMs < 300) throw new Error("TIME_BUDGET_EXHAUSTED");
 
-  const model = String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
-  const systemPrompt = process.env.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
-  // Google Search Grounding отключен, так как на текущих API-ключах Google возвращает 429 и длится дольше лимита Алисы (4.5с)
-  const enableSearch = false;
+  const preferredModel = String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
+  const modelsToTry = [
+    preferredModel,
+    preferredModel !== "gemini-3.5-flash" ? "gemini-3.5-flash" : "gemini-flash-latest",
+    "gemini-3.5-flash-lite"
+  ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
+  const systemPrompt = process.env.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
   const contents = safeHistory(history).map(item => ({
     role: item.role,
     parts: [{ text: item.text }]
   }));
   contents.push({ role: "user", parts: [{ text }] });
 
-  const requestBody = (withTools) => ({
+  const requestBody = {
     systemInstruction: { parts: [{ text: systemPrompt }] },
     contents,
     generationConfig: {
       temperature: 0.7,
-      maxOutputTokens: 400
-    },
-    ...(withTools ? { tools: [{ googleSearch: {} }] } : {})
-  });
+      maxOutputTokens: 350
+    }
+  };
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+  let lastError = null;
+  const deadline = Date.now() + timeoutMs;
 
-  // Первая попытка: с поиском (если включен)
-  let { response, data } = await fetchWithTimeout(
-    url,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody(enableSearch))
-    },
-    timeoutMs
-  );
+  for (const model of modelsToTry) {
+    const remainingTime = deadline - Date.now();
+    if (remainingTime < 450) break;
 
-  // Если поиск отклонен из-за квоты 429 или не поддерживается, делаем мгновенный ретрай без tools
-  if (!response.ok && enableSearch && response.status === 429) {
-    console.warn("Search grounding quota reached; retrying without tools.");
-    const retry = await fetchWithTimeout(
-      url,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody(false))
-      },
-      Math.max(1000, timeoutMs - 1000)
-    );
-    response = retry.response;
-    data = retry.data;
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+      const { response, data } = await fetchWithTimeout(
+        url,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody)
+        },
+        Math.min(remainingTime, 2800)
+      );
+
+      if (response.ok) {
+        const candidate = data?.candidates?.[0];
+        const answer = (candidate?.content?.parts || [])
+          .map(p => (typeof p.text === "string" ? p.text : ""))
+          .join("")
+          .trim();
+        if (answer) return answer;
+      }
+
+      const status = Number(response.status);
+      console.warn(`Model ${model} returned HTTP ${status}:`, data?.error?.message);
+
+      if (status === 400 || status === 401 || status === 403) {
+        throw new Error("GEMINI_KEY_REJECTED");
+      }
+      if (status === 429) {
+        lastError = new Error("GEMINI_QUOTA");
+      } else {
+        lastError = new Error("GEMINI_REQUEST_FAILED");
+      }
+    } catch (err) {
+      if (err.message === "GEMINI_KEY_REJECTED") throw err;
+      lastError = err;
+    }
   }
 
-  if (!response.ok) {
-    const status = Number(response.status);
-    console.error("Gemini API error HTTP", status, data?.error?.message);
-    if (status === 400 || status === 401 || status === 403) throw new Error("GEMINI_KEY_REJECTED");
-    if (status === 429) throw new Error("GEMINI_QUOTA");
-    throw new Error("GEMINI_REQUEST_FAILED");
-  }
-
-  const candidate = data?.candidates?.[0];
-  const answer = (candidate?.content?.parts || [])
-    .map(p => (typeof p.text === "string" ? p.text : ""))
-    .join("")
-    .trim();
-
-  if (!answer) {
-    if (data?.promptFeedback?.blockReason) throw new Error("GEMINI_BLOCKED");
-    throw new Error("GEMINI_EMPTY_RESPONSE");
-  }
-
-  return answer;
+  throw lastError || new Error("GEMINI_REQUEST_FAILED");
 }
 
 /**
@@ -254,7 +253,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       service: "alice-gemini-skill",
-      version: "2.0.0",
+      version: "2.1.0",
       status: "ready",
       message: "Webhook is active. Configure Yandex Dialogs to send POST requests to this URL."
     });
