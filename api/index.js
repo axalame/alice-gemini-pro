@@ -2,8 +2,8 @@ const DEFAULT_MODEL = "gemini-3.5-flash";
 const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_CHARS = 2400;
 const MAX_ALICE_TEXT = 1000;
-const TOTAL_BUDGET_MS = 4300;
-const GEMINI_TIMEOUT_MS = 3800;
+const TOTAL_BUDGET_MS = 4350;
+const GEMINI_TIMEOUT_MS = 3950;
 
 function isSearchIntent(text) {
   return /\b(latest|today|current|news|weather|price|exchange rate|recent|search|look up)\b|сегодня|сейчас|последн|новост|погод|курс валют|найди|поищи|актуальн|сколько стоит|свежие данные|счет матча|кто выиграл/i.test(text);
@@ -12,8 +12,9 @@ function isSearchIntent(text) {
 const DEFAULT_SYSTEM_PROMPT = [
   "Ты — голосовой помощник для умной колонки Яндекс Алиса.",
   "Твой ответ будет сразу озвучен Алисой вслух через динамик колонки.",
-  "Отвечай кратко, понятно и по существу (2–3 полных законченных предложения).",
+  "Отвечай кратко, понятно и по существу (1–3 полных законченных предложения).",
   "Всегда формулируй законченную мысль и никогда не обрывай предложения.",
+  "Если пользователь спрашивает текущую погоду, точное время или курс валют, кратко ответь в одно предложение, что у тебя нет прямого датчика погоды и точный прогноз лучше спросить у обычной Алисы вне навыка.",
   "СТРОГО ЗАПРЕЩЕНО:",
   "1) Добавлять любые технические слова, префиксы или пометки в начале ответа (такие как 'Friendly response:', 'Response:', 'Ответ:', 'Assistant:');",
   "2) Оборачивать ответ или фразы в любые кавычки;",
@@ -155,8 +156,7 @@ async function askGemini(text, history, timeoutMs) {
   const preferredModel = String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
   const modelsToTry = [
     preferredModel,
-    preferredModel !== "gemini-3.5-flash" ? "gemini-3.5-flash" : "gemini-flash-latest",
-    "gemini-3.5-flash-lite"
+    preferredModel !== "gemini-3.5-flash-lite" ? "gemini-3.5-flash-lite" : "gemini-3.5-flash"
   ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
   const systemPrompt = process.env.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
@@ -171,7 +171,7 @@ async function askGemini(text, history, timeoutMs) {
     contents,
     generationConfig: {
       temperature: 0.7,
-      maxOutputTokens: 250
+      maxOutputTokens: 160
     }
   };
 
@@ -180,7 +180,7 @@ async function askGemini(text, history, timeoutMs) {
 
   for (const model of modelsToTry) {
     const remainingTime = deadline - Date.now();
-    if (remainingTime < 450) break;
+    if (remainingTime < 800) break;
 
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
@@ -191,7 +191,7 @@ async function askGemini(text, history, timeoutMs) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(requestBody)
         },
-        Math.min(remainingTime, 3200)
+        remainingTime - 100
       );
 
       if (response.ok) {
@@ -253,7 +253,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       service: "alice-gemini-skill",
-      version: "2.3.0",
+      version: "2.4.0",
       status: "ready",
       message: "Webhook is active. Configure Yandex Dialogs to send POST requests to this URL."
     });
@@ -322,7 +322,7 @@ export default async function handler(req, res) {
     const answer = await askGemini(
       text,
       oldHistory,
-      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingBudget() - 400))
+      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingBudget() - 250))
     );
 
     const history = [
