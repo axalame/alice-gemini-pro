@@ -6,19 +6,19 @@ const TOTAL_BUDGET_MS = 4350;
 const GEMINI_TIMEOUT_MS = 3950;
 
 function isSearchIntent(text) {
-  return /\b(latest|today|current|news|weather|price|exchange rate|recent|search|look up)\b|сегодня|сейчас|последн|новост|погод|курс валют|найди|поищи|актуальн|сколько стоит|свежие данные|счет матча|кто выиграл/i.test(text);
+  return /\b(latest|today|current|news|weather|price|exchange rate|recent|search|look up)\b|сегодня|сейчас|последн|новост|погод|курс|найди|поищи|актуальн|сколько стоит|свежие данные|счет матча|кто выиграл|что произошло|что случилось/i.test(text);
 }
 
 const DEFAULT_SYSTEM_PROMPT = [
-  "Ты — голосовой помощник для умной колонки Яндекс Алиса.",
+  "Ты — умный голосовой помощник для колонки Яндекс Алиса на базе Google Gemini с живым доступом в интернет.",
   "Твой ответ будет сразу озвучен Алисой вслух через динамик колонки.",
   "Отвечай кратко, понятно и по существу (1–3 полных законченных предложения).",
   "Всегда формулируй законченную мысль и никогда не обрывай предложения.",
-  "Если пользователь спрашивает текущую погоду, точное время или курс валют, кратко ответь в одно предложение, что у тебя нет прямого датчика погоды и точный прогноз лучше спросить у обычной Алисы вне навыка.",
+  "Используй актуальные данные и факты для вопросов о погоде, новостях, курсах валют и текущих событиях.",
   "СТРОГО ЗАПРЕЩЕНО:",
   "1) Добавлять любые технические слова, префиксы или пометки в начале ответа (такие как 'Friendly response:', 'Response:', 'Ответ:', 'Assistant:');",
   "2) Оборачивать ответ или фразы в любые кавычки;",
-  "3) Включать интернет-ссылки, Markdown (*, _, #), списки, дефисы и эмодзи.",
+  "3) Включать интернет-ссылки (URL), сноски источников [1], Markdown (*, _, #), списки, дефисы и эмодзи.",
   "Начинай сразу с текста ответа, чтобы колонка не произносила лишних слов.",
   "Не здоровайся повторно, если диалог уже начат."
 ].join(" ");
@@ -44,7 +44,7 @@ function isHelpIntent(text) {
 }
 
 /**
- * Очистка текста от Markdown, URL и спецсимволов для идеального озвучивания Алисой
+ * Очистка текста от Markdown, URL, сносок поиска и спецсимволов для идеального озвучивания Алисой
  */
 function cleanVoiceText(value) {
   let text = String(value ?? "")
@@ -53,6 +53,8 @@ function cleanVoiceText(value) {
     .replace(/^((?:friendly\s+)?(?:response|answer|output|assistant|ai|голос|ответ|помощник|алиса))\s*[:\-–—]\s*/i, "")
     .replace(/^[\s"'«“„]+/, "")
     .replace(/[\s"'»”]+$/, "")
+    // Удаляем сноски поиска Google вида [1], [2], [1, 2], [1-3]
+    .replace(/\[\s*\d+(?:[\s,–-]+\d+)*\s*\]/g, "")
     // Удаляем URL-ссылки, сохраняя знаки препинания после них
     .replace(/https?:\/\/[^\s]+?(?=[.,!?;:]*(\s|$))/gi, "")
     // Удаляем markdown жирный/курсив (**текст**, *текст*, __текст__)
@@ -159,6 +161,10 @@ async function askGemini(text, history, timeoutMs, overrideModel) {
     preferredModel !== "gemini-3.5-flash" ? "gemini-3.5-flash" : "gemini-3-flash-preview"
   ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
+  const enableSearchSetting = String(process.env.ENABLE_GOOGLE_SEARCH ?? "auto").toLowerCase().trim();
+  const searchEligible = enableSearchSetting === "always" ||
+    (enableSearchSetting !== "false" && isSearchIntent(text));
+
   const systemPrompt = process.env.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
   const contents = safeHistory(history).map(item => ({
     role: item.role,
@@ -166,7 +172,7 @@ async function askGemini(text, history, timeoutMs, overrideModel) {
   }));
   contents.push({ role: "user", parts: [{ text }] });
 
-  const requestBody = {
+  const baseRequestBody = {
     systemInstruction: { parts: [{ text: systemPrompt }] },
     contents,
     generationConfig: {
@@ -182,41 +188,75 @@ async function askGemini(text, history, timeoutMs, overrideModel) {
     const remainingTime = deadline - Date.now();
     if (remainingTime < 800) break;
 
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
-      const { response, data } = await fetchWithTimeout(
-        url,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(requestBody)
-        },
-        remainingTime - 100
-      );
+    // Формируем варианты запроса: сначала с поиском Google (если актуально), затем обычный
+    const attempts = [];
+    if (searchEligible && remainingTime >= 2400) {
+      attempts.push({
+        withSearch: true,
+        body: { ...baseRequestBody, tools: [{ google_search: {} }] },
+        timeout: Math.min(2200, remainingTime - 1500)
+      });
+    }
+    attempts.push({
+      withSearch: false,
+      body: baseRequestBody,
+      timeout: null // будет вычислен динамически от оставшегося времени
+    });
 
-      if (response.ok) {
-        const candidate = data?.candidates?.[0];
-        const answer = (candidate?.content?.parts || [])
-          .map(p => (typeof p.text === "string" ? p.text : ""))
-          .join("")
-          .trim();
-        if (answer) return answer;
-      }
+    for (const attempt of attempts) {
+      const currentRemaining = deadline - Date.now();
+      if (currentRemaining < 700) break;
 
-      const status = Number(response.status);
-      console.warn(`Model ${model} returned HTTP ${status}:`, data?.error?.message);
+      const attemptTimeout = attempt.timeout
+        ? Math.min(attempt.timeout, currentRemaining - 100)
+        : currentRemaining - 100;
 
-      if (status === 401 || status === 403) {
-        throw new Error("GEMINI_KEY_REJECTED");
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+        const { response, data } = await fetchWithTimeout(
+          url,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(attempt.body)
+          },
+          attemptTimeout
+        );
+
+        if (response.ok) {
+          const candidate = data?.candidates?.[0];
+          const answer = (candidate?.content?.parts || [])
+            .map(p => (typeof p.text === "string" ? p.text : ""))
+            .join("")
+            .trim();
+          if (answer) return answer;
+        }
+
+        const status = Number(response.status);
+        if (status === 401 || status === 403) {
+          throw new Error("GEMINI_KEY_REJECTED");
+        }
+
+        // Если попытка с поиском вернула 429/400 (ограничение тарифа Google AI Studio на поиск),
+        // логируем и бесшовно переходим к базовой генерации без инструментов
+        if (attempt.withSearch) {
+          console.warn(`Search grounding unavailable (HTTP ${status}), falling back to direct generation...`);
+          continue;
+        }
+
+        if (status === 429) {
+          lastError = new Error("GEMINI_QUOTA");
+        } else {
+          lastError = new Error("GEMINI_REQUEST_FAILED");
+        }
+      } catch (err) {
+        if (err.message === "GEMINI_KEY_REJECTED") throw err;
+        if (attempt.withSearch && (err.name === "AbortError" || err.message === "TIME_BUDGET_EXHAUSTED")) {
+          console.warn("Search attempt timed out, falling back to direct generation...");
+          continue;
+        }
+        lastError = err;
       }
-      if (status === 429) {
-        lastError = new Error("GEMINI_QUOTA");
-      } else {
-        lastError = new Error("GEMINI_REQUEST_FAILED");
-      }
-    } catch (err) {
-      if (err.message === "GEMINI_KEY_REJECTED") throw err;
-      lastError = err;
     }
   }
 
@@ -253,7 +293,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       service: "alice-gemini-skill",
-      version: "3.2.0",
+      version: "3.3.0",
       status: "ready",
       message: "Webhook is active. Configure Yandex Dialogs to send POST requests to this URL."
     });

@@ -5,7 +5,8 @@ import handler, {
   cleanVoiceText,
   safeHistory,
   isExitIntent,
-  isHelpIntent
+  isHelpIntent,
+  isSearchIntent
 } from "../api/index.js";
 
 test("aliceResponse generates compliant Yandex Dialogs structure", () => {
@@ -26,6 +27,14 @@ test("cleanVoiceText removes URLs, markdown and emojis for comfortable voice pla
   assert.ok(!clean.includes("https://"));
   assert.ok(!clean.includes("**"));
   assert.ok(!clean.includes("😄"));
+});
+
+test("cleanVoiceText removes search grounding citations like [1] and [2, 3]", () => {
+  const grounded = "Сегодня в Балашихе +14 градусов [1]. Ожидается переменная облачность [2, 3].";
+  const clean = cleanVoiceText(grounded);
+  assert.equal(clean, "Сегодня в Балашихе +14 градусов. Ожидается переменная облачность.");
+  assert.ok(!clean.includes("[1]"));
+  assert.ok(!clean.includes("[2, 3]"));
 });
 
 test("cleanVoiceText removes technical prefixes like friendly response and quotes", () => {
@@ -54,6 +63,15 @@ test("isHelpIntent detects help requests", () => {
   assert.equal(isHelpIntent("помощь"), true);
   assert.equal(isHelpIntent("правила"), true);
   assert.equal(isHelpIntent("кто президент"), false);
+});
+
+test("isSearchIntent detects queries requiring real-time search", () => {
+  assert.equal(isSearchIntent("какая сегодня погода в Балашихе"), true);
+  assert.equal(isSearchIntent("свежие новости технологий"), true);
+  assert.equal(isSearchIntent("курс доллара сейчас"), true);
+  assert.equal(isSearchIntent("кто выиграл матч вчера"), true);
+  assert.equal(isSearchIntent("найди информацию о телескопе"), true);
+  assert.equal(isSearchIntent("привет как дела"), false);
 });
 
 test("safeHistory enforces limits to avoid Yandex 10KB session_state overflow", () => {
