@@ -253,7 +253,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       service: "alice-gemini-skill",
-      version: "3.1.0",
+      version: "3.2.0",
       status: "ready",
       message: "Webhook is active. Configure Yandex Dialogs to send POST requests to this URL."
     });
@@ -292,8 +292,9 @@ export default async function handler(req, res) {
 
   // 1. Первый запуск (Приветствие)
   if (!text) {
+    const greeting = process.env.GREETING_MESSAGE || "Привет! Я на связи. О чём хотите узнать?";
     return res.status(200).json(aliceResponse(
-      "Привет! Я умный голосовой помощник на базе Google Gemini. Могу отвечать на сложные вопросы или искать свежие данные в интернете. О чём хотите узнать?",
+      greeting,
       false,
       oldHistory
     ));
