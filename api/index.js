@@ -24,9 +24,8 @@ const DEFAULT_SYSTEM_PROMPT = [
 ].join(" ");
 
 const DEFAULT_BUTTONS = [
-  { title: "Что ты умеешь?", hide: true },
-  { title: "Интересный факт", hide: true },
-  { title: "Хватит", hide: true }
+  { title: "Что ты помнишь?", hide: true },
+  { title: "Что ты умеешь?", hide: true }
 ];
 
 /**
@@ -44,42 +43,60 @@ function isHelpIntent(text) {
 }
 
 /**
+ * Проверка команд запоминания фактов
+ */
+function isRememberIntent(text) {
+  const t = String(text || "").trim();
+  return /^(?:алиса\s*,?\s*)?(?:запомни|сохрани|запиши)(?:\s*,\s*что|\s+что|\s+мой|\s+моё|\s+мои|\s+обо\s+мне)?\s*(.+)/i.test(t);
+}
+
+/**
+ * Извлечение текста факта для сохранения
+ */
+function extractFact(text) {
+  const match = text.trim().match(/^(?:алиса\s*,?\s*)?(?:запомни|сохрани|запиши)(?:\s*,\s*что|\s+что|\s+мой|\s+моё|\s+мои|\s+обо\s+мне)?\s*(.+)/i);
+  return match ? match[1].trim() : "";
+}
+
+/**
+ * Проверка запроса информации из памяти
+ */
+function isRecallIntent(text) {
+  return /^(?:алиса\s*,?\s*)?(?:что ты обо мне знаешь|что ты помнишь|что обо мне помнишь|покажи память|что сохранено|мои данные|моя информация)/i.test(text.trim());
+}
+
+/**
+ * Проверка команды сброса памяти
+ */
+function isForgetIntent(text) {
+  return /^(?:алиса\s*,?\s*)?(?:забудь всё|очисти память|сотри память|удали мои данные|забудь обо мне)/i.test(text.trim());
+}
+
+/**
  * Очистка текста от Markdown, URL, сносок поиска и спецсимволов для идеального озвучивания Алисой
  */
 function cleanVoiceText(value) {
   let text = String(value ?? "")
-    // Удаляем любые кавычки в начале и технические префиксы модели (friendly response:, Ответ:, Response: и т.д.)
     .replace(/^[\s"'«“„]+/, "")
     .replace(/^((?:friendly\s+)?(?:response|answer|output|assistant|ai|голос|ответ|помощник|алиса))\s*[:\-–—]\s*/i, "")
     .replace(/^[\s"'«“„]+/, "")
     .replace(/[\s"'»”]+$/, "")
-    // Удаляем сноски поиска Google вида [1], [2], [1, 2], [1-3]
     .replace(/\[\s*\d+(?:[\s,–-]+\d+)*\s*\]/g, "")
-    // Удаляем URL-ссылки, сохраняя знаки препинания после них
     .replace(/https?:\/\/[^\s]+?(?=[.,!?;:]*(\s|$))/gi, "")
-    // Удаляем markdown жирный/курсив (**текст**, *текст*, __текст__)
     .replace(/(\*\*|__)(.*?)\1/g, "$2")
     .replace(/(\*|_)(.*?)\1/g, "$2")
-    // Удаляем символы заголовков #, маркеров списков и цитат
     .replace(/(^|\s)[#*>-]+[ \t]*/g, "$1")
-    // Удаляем обратные кавычки кода
     .replace(/`{1,3}[^`]*`{1,3}/g, "")
-    // Удаляем эмодзи и спецсимволы
     .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, "")
-    // Удаляем оставшиеся изолированные кавычки для чистоты озвучки
     .replace(/["«»“”„]/g, "")
-    // Убираем лишние пробелы перед знаками препинания
     .replace(/\s+([.,!?;:])/g, "$1")
-    // Нормализуем пробелы и переводы строк
     .replace(/[\r\n\t]+/g, " ")
     .replace(/\s{2,}/g, " ")
     .trim();
 
   if (!text) return "Не удалось сформировать ответ. Попробуйте спросить иначе.";
-
   if (text.length <= MAX_ALICE_TEXT) return text;
 
-  // Если текст длиннее лимита, аккуратно режем по концу предложения
   const candidate = text.slice(0, MAX_ALICE_TEXT - 1);
   const sentenceEnd = Math.max(
     candidate.lastIndexOf(". "),
@@ -101,7 +118,6 @@ function safeHistory(history) {
     .filter(item => item && (item.role === "user" || item.role === "model") && typeof item.text === "string")
     .slice(-MAX_HISTORY_MESSAGES);
 
-  // Контролируем общий размер символов
   let totalChars = 0;
   const result = [];
   for (let i = valid.length - 1; i >= 0; i--) {
@@ -115,20 +131,47 @@ function safeHistory(history) {
 }
 
 /**
+ * Очистка и валидация постоянного состояния пользователя (лимит Яндекса 1 КБ)
+ */
+function safeUserState(userState) {
+  if (!userState || typeof userState !== "object") {
+    return { facts: [] };
+  }
+  const facts = Array.isArray(userState.facts)
+    ? userState.facts.filter(f => typeof f === "string" && f.trim().length > 0).slice(-8)
+    : [];
+  return {
+    facts: facts.map(f => f.slice(0, 120))
+  };
+}
+
+/**
  * Формирование ответа по протоколу Яндекс Диалогов
  */
-function aliceResponse(text, endSession = false, history = [], buttons = DEFAULT_BUTTONS) {
+function aliceResponse(
+  text,
+  endSession = false,
+  history = [],
+  buttons = DEFAULT_BUTTONS,
+  userStateUpdate = null,
+  soundPrefix = ""
+) {
   const clean = cleanVoiceText(text);
-  return {
+  const tts = soundPrefix ? `${soundPrefix} ${clean}` : clean;
+  const res = {
     version: "1.0",
     response: {
       text: clean,
-      tts: clean,
+      tts: tts,
       end_session: endSession,
       buttons: endSession ? [] : buttons
     },
     session_state: { history }
   };
+  if (userStateUpdate !== null) {
+    res.user_state_update = userStateUpdate;
+  }
+  return res;
 }
 
 /**
@@ -149,7 +192,7 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 /**
  * Запрос к Google Gemini с автоматическим переключением моделей (fallback) при перегрузке или лимитах 429/503
  */
-async function askGemini(text, history, timeoutMs, overrideModel) {
+async function askGemini(text, history, timeoutMs, overrideModel, userContext = "") {
   let rawKey = process.env.GEMINI_API_KEY || process.env.gemini || process.env.GEMINI_KEY || "";
   const key = String(rawKey).replace(/^['"]|['"]$/g, "").trim();
   if (!key) throw new Error("MISSING_GEMINI_KEY");
@@ -164,86 +207,80 @@ async function askGemini(text, history, timeoutMs, overrideModel) {
   ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
   const enableSearchSetting = String(process.env.ENABLE_GOOGLE_SEARCH ?? "auto").toLowerCase().trim();
-  const searchEligible = enableSearchSetting === "always" ||
-    (enableSearchSetting !== "false" && isSearchIntent(text));
+  const userWantsSearch = enableSearchSetting === "true" || (enableSearchSetting !== "false" && isSearchIntent(text));
 
-  const systemPrompt = process.env.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
-  const contents = safeHistory(history).map(item => ({
-    role: item.role,
-    parts: [{ text: item.text }]
-  }));
-  contents.push({ role: "user", parts: [{ text }] });
+  const contents = [];
+  for (const h of history) {
+    contents.push({
+      role: h.role,
+      parts: [{ text: h.text }]
+    });
+  }
+  contents.push({
+    role: "user",
+    parts: [{ text }]
+  });
 
-  const baseRequestBody = {
-    systemInstruction: { parts: [{ text: systemPrompt }] },
-    contents,
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 800
-    }
-  };
+  let fullSystemPrompt = DEFAULT_SYSTEM_PROMPT;
+  if (userContext && userContext.trim().length > 0) {
+    fullSystemPrompt += ` Дополнительный контекст о пользователе из памяти: ${userContext.trim()}.`;
+  }
 
   let lastError = null;
-  const deadline = Date.now() + timeoutMs;
 
   for (const model of modelsToTry) {
-    const remainingTime = deadline - Date.now();
-    if (remainingTime < 800) break;
-
-    // Формируем варианты запроса: сначала с поиском Google (если актуально), затем обычный
-    const attempts = [];
-    if (searchEligible && remainingTime >= 2400) {
-      attempts.push({
-        withSearch: true,
-        body: { ...baseRequestBody, tools: [{ google_search: {} }] },
-        timeout: Math.min(2200, remainingTime - 1500)
-      });
-    }
-    attempts.push({
-      withSearch: false,
-      body: baseRequestBody,
-      timeout: null // будет вычислен динамически от оставшегося времени
-    });
+    const attempts = userWantsSearch ? [{ withSearch: true }, { withSearch: false }] : [{ withSearch: false }];
 
     for (const attempt of attempts) {
-      const currentRemaining = deadline - Date.now();
-      if (currentRemaining < 700) break;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
 
-      const attemptTimeout = attempt.timeout
-        ? Math.min(attempt.timeout, currentRemaining - 100)
-        : currentRemaining - 100;
+      const requestPayload = {
+        system_instruction: {
+          parts: [{ text: fullSystemPrompt }]
+        },
+        contents,
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 500
+        }
+      };
+
+      if (attempt.withSearch) {
+        requestPayload.tools = [{ google_search: {} }];
+      }
+
+      const postBudget = attempt.withSearch ? Math.min(timeoutMs, 2400) : timeoutMs;
+      if (postBudget < 250) continue;
 
       try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
         const { response, data } = await fetchWithTimeout(
           url,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(attempt.body)
+            body: JSON.stringify(requestPayload)
           },
-          attemptTimeout
+          postBudget
         );
 
         if (response.ok) {
-          const candidate = data?.candidates?.[0];
-          const answer = (candidate?.content?.parts || [])
-            .map(p => (typeof p.text === "string" ? p.text : ""))
-            .join("")
-            .trim();
-          if (answer) return answer;
+          const rawAnswer = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (rawAnswer && typeof rawAnswer === "string" && rawAnswer.trim().length > 0) {
+            return rawAnswer.trim();
+          }
+          if (data?.promptFeedback?.blockReason || data?.candidates?.[0]?.finishReason === "SAFETY") {
+            throw new Error("GEMINI_BLOCKED");
+          }
         }
 
-        const status = Number(response.status);
-        if (status === 401 || status === 403) {
-          throw new Error("GEMINI_KEY_REJECTED");
-        }
+        const status = response.status;
+        const errMessage = data?.error?.message || "";
+        const errStatus = data?.error?.status || "";
 
-        // Если попытка с поиском вернула 429/400 (ограничение тарифа Google AI Studio на поиск),
-        // логируем и бесшовно переходим к базовой генерации без инструментов
-        if (attempt.withSearch) {
-          console.warn(`Search grounding unavailable (HTTP ${status}), falling back to direct generation...`);
-          continue;
+        if (status === 400 && (errMessage.includes("API key") || errStatus === "INVALID_ARGUMENT")) {
+          const err = new Error("GEMINI_KEY_REJECTED");
+          err.details = errMessage;
+          throw err;
         }
 
         if (status === 429) {
@@ -290,12 +327,11 @@ function errorForUser(error) {
  * Основной обработчик вебхука Яндекс Диалогов
  */
 export default async function handler(req, res) {
-  // Healthcheck для Vercel и браузера
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
       service: "alice-gemini-skill",
-      version: "3.4.0",
+      version: "3.6.0",
       status: "ready",
       message: "Webhook is active. Configure Yandex Dialogs to send POST requests to this URL."
     });
@@ -306,7 +342,6 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // Опциональная защита токеном в query (?token=secret)
   if (process.env.WEBHOOK_SECRET) {
     const urlToken = req.query?.token;
     if (urlToken !== process.env.WEBHOOK_SECRET) {
@@ -320,12 +355,13 @@ export default async function handler(req, res) {
   const body = req.body && typeof req.body === "object" ? req.body : {};
   const text = String(body?.request?.command || body?.request?.original_utterance || "").trim();
   const oldHistory = safeHistory(body?.state?.session?.history);
+  const userState = safeUserState(body?.state?.user);
+  const userFacts = userState.facts || [];
 
-  // 0. Debug режим для диагностики задержки
   if (body?.debug) {
     const t0 = Date.now();
     try {
-      const answer = await askGemini(text || "Тест", oldHistory, 4000, body?.model);
+      const answer = await askGemini(text || "Тест", oldHistory, 4000, body?.model, userFacts.join("; "));
       return res.status(200).json({ ok: true, duration: Date.now() - t0, answer });
     } catch (err) {
       return res.status(200).json({ ok: false, duration: Date.now() - t0, error: err.message, details: err.details });
@@ -335,11 +371,7 @@ export default async function handler(req, res) {
   // 1. Первый запуск (Приветствие)
   if (!text) {
     const greeting = process.env.GREETING_MESSAGE || "Привет! Я на связи. О чём хотите узнать?";
-    return res.status(200).json(aliceResponse(
-      greeting,
-      false,
-      oldHistory
-    ));
+    return res.status(200).json(aliceResponse(greeting, false, oldHistory));
   }
 
   // 2. Быстрый перехват команд завершения
@@ -354,19 +386,63 @@ export default async function handler(req, res) {
   // 3. Быстрый перехват команд помощи
   if (isHelpIntent(text)) {
     return res.status(200).json(aliceResponse(
-      "Я умею отвечать на вопросы, решать логические задачи, помогать с советами и находить актуальные новости. Просто спросите меня голосом, как обычного собеседника.",
+      "Я умный помощник на базе Google Gemini с живым доступом в интернет. Я умею отвечать на вопросы и помнить факты о вас (скажите «Запомни, что...»).",
       false,
       oldHistory
     ));
   }
 
-  // 4. Запрос к Gemini
+  // 4. Команда сброса памяти («Забудь всё»)
+  if (isForgetIntent(text)) {
+    return res.status(200).json(aliceResponse(
+      "Память очищена. Я забыла все сохранённые о вас факты.",
+      false,
+      oldHistory,
+      DEFAULT_BUTTONS,
+      { facts: [] },
+      '<speaker audio="alice-sounds-game-ping-1.opus">'
+    ));
+  }
+
+  // 5. Команда просмотра памяти («Что ты обо мне знаешь?»)
+  if (isRecallIntent(text)) {
+    const answerText = userFacts.length > 0
+      ? `Вот что я о вас помню: ${userFacts.join("; ")}. Чтобы удалить данные, скажите «Забудь всё».`
+      : "Я пока ничего о вас не сохранила. Вы можете сказать: «Запомни, что...», и я сохраню важные факты.";
+    return res.status(200).json(aliceResponse(answerText, false, oldHistory, DEFAULT_BUTTONS));
+  }
+
+  // 6. Команда запоминания («Запомни, что...»)
+  if (isRememberIntent(text)) {
+    const rawFact = extractFact(text);
+    if (!rawFact) {
+      return res.status(200).json(aliceResponse(
+        "Что именно мне запомнить? Скажите, например: «Запомни, что меня зовут Руслан».",
+        false,
+        oldHistory
+      ));
+    }
+    const newFacts = [...userFacts.filter(f => f.toLowerCase() !== rawFact.toLowerCase()), rawFact].slice(-8);
+    const updatedState = { ...userState, facts: newFacts };
+    return res.status(200).json(aliceResponse(
+      `Запомнила: ${rawFact}. Буду это учитывать!`,
+      false,
+      oldHistory,
+      DEFAULT_BUTTONS,
+      updatedState,
+      '<speaker audio="alice-sounds-things-bell-1.opus">'
+    ));
+  }
+
+  // 7. Запрос к Gemini
   try {
+    const userContext = userFacts.length > 0 ? userFacts.join("; ") : "";
     const answer = await askGemini(
       text,
       oldHistory,
       Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingBudget() - 250)),
-      body?.model
+      body?.model,
+      userContext
     );
 
     const history = [
@@ -387,8 +463,13 @@ export default async function handler(req, res) {
 export {
   cleanVoiceText,
   safeHistory,
+  safeUserState,
   aliceResponse,
   isExitIntent,
   isHelpIntent,
-  isSearchIntent
+  isSearchIntent,
+  isRememberIntent,
+  extractFact,
+  isRecallIntent,
+  isForgetIntent
 };

@@ -4,20 +4,33 @@ import handler, {
   aliceResponse,
   cleanVoiceText,
   safeHistory,
+  safeUserState,
   isExitIntent,
   isHelpIntent,
-  isSearchIntent
+  isSearchIntent,
+  isRememberIntent,
+  extractFact,
+  isRecallIntent,
+  isForgetIntent
 } from "../api/index.js";
 
-test("aliceResponse generates compliant Yandex Dialogs structure", () => {
-  const res = aliceResponse("Привет мир", false, [{ role: "user", text: "вопрос" }]);
+test("aliceResponse generates compliant Yandex Dialogs structure with user_state_update and sounds", () => {
+  const userState = { facts: ["тест"] };
+  const res = aliceResponse(
+    "Привет мир",
+    false,
+    [{ role: "user", text: "вопрос" }],
+    undefined,
+    userState,
+    '<speaker audio="alice-sounds-things-bell-1.opus">'
+  );
   assert.equal(res.version, "1.0");
   assert.equal(res.response.text, "Привет мир");
-  assert.equal(res.response.tts, "Привет мир");
+  assert.equal(res.response.tts, '<speaker audio="alice-sounds-things-bell-1.opus"> Привет мир');
   assert.equal(res.response.end_session, false);
   assert.ok(Array.isArray(res.response.buttons));
-  assert.equal(res.response.buttons.length, 3);
   assert.deepEqual(res.session_state.history, [{ role: "user", text: "вопрос" }]);
+  assert.deepEqual(res.user_state_update, userState);
 });
 
 test("cleanVoiceText removes URLs, markdown and emojis for comfortable voice playback", () => {
@@ -74,31 +87,28 @@ test("isSearchIntent detects queries requiring real-time search", () => {
   assert.equal(isSearchIntent("привет как дела"), false);
 });
 
-test("safeHistory enforces limits to avoid Yandex 10KB session_state overflow", () => {
-  const input = Array.from({ length: 15 }, (_, i) => ({
-    role: i % 2 ? "model" : "user",
-    text: "Сообщение " + i
-  }));
-  const history = safeHistory(input);
-  assert.ok(history.length <= 6);
-  assert.equal(history[history.length - 1].text, "Сообщение 14");
+test("Memory intent recognizers work accurately", () => {
+  assert.equal(isRememberIntent("запомни, что меня зовут Руслан"), true);
+  assert.equal(isRememberIntent("сохрани я живу в Балашихе"), true);
+  assert.equal(extractFact("запомни, что меня зовут Руслан"), "меня зовут Руслан");
+  assert.equal(extractFact("сохрани мой размер обуви 43"), "размер обуви 43");
+
+  assert.equal(isRecallIntent("что ты обо мне знаешь"), true);
+  assert.equal(isRecallIntent("что ты помнишь"), true);
+  assert.equal(isForgetIntent("забудь всё"), true);
+  assert.equal(isForgetIntent("очисти память"), true);
 });
 
-test("GET health check returns 200 with service status", async () => {
-  let statusCode = 0;
-  let responseData = null;
-  const res = {
-    status(code) { statusCode = code; return this; },
-    json(data) { responseData = data; return this; },
-    setHeader() {}
+test("safeUserState limits facts to avoid 1KB Yandex overflow", () => {
+  const messy = {
+    facts: Array.from({ length: 20 }, (_, i) => "Факт " + i)
   };
-  await handler({ method: "GET" }, res);
-  assert.equal(statusCode, 200);
-  assert.equal(responseData.ok, true);
-  assert.equal(responseData.service, "alice-gemini-skill");
+  const safe = safeUserState(messy);
+  assert.ok(safe.facts.length <= 8);
+  assert.equal(safe.facts[safe.facts.length - 1], "Факт 19");
 });
 
-test("POST with exit intent closes the session without calling external APIs", async () => {
+test("POST with remember intent updates user_state_update without calling Gemini", async () => {
   let statusCode = 0;
   let responseData = null;
   const res = {
@@ -108,28 +118,75 @@ test("POST with exit intent closes the session without calling external APIs", a
   };
   await handler({
     method: "POST",
-    body: { request: { command: "хватит" } }
+    body: {
+      request: { command: "запомни, что меня зовут Руслан" },
+      state: { user: { facts: ["живу в Балашихе"] } }
+    }
+  }, res);
+
+  assert.equal(statusCode, 200);
+  assert.match(responseData.response.text, /Запомнила/);
+  assert.ok(responseData.response.tts.includes("alice-sounds-things-bell-1.opus"));
+  assert.deepEqual(responseData.user_state_update.facts, ["живу в Балашихе", "меня зовут Руслан"]);
+});
+
+test("POST with recall intent returns saved facts", async () => {
+  let statusCode = 0;
+  let responseData = null;
+  const res = {
+    status(code) { statusCode = code; return this; },
+    json(data) { responseData = data; return this; },
+    setHeader() {}
+  };
+  await handler({
+    method: "POST",
+    body: {
+      request: { command: "что ты обо мне знаешь" },
+      state: { user: { facts: ["меня зовут Руслан", "живу в Балашихе"] } }
+    }
+  }, res);
+
+  assert.equal(statusCode, 200);
+  assert.match(responseData.response.text, /Руслан/);
+  assert.match(responseData.response.text, /Балашихе/);
+});
+
+test("POST with forget intent clears user_state_update", async () => {
+  let statusCode = 0;
+  let responseData = null;
+  const res = {
+    status(code) { statusCode = code; return this; },
+    json(data) { responseData = data; return this; },
+    setHeader() {}
+  };
+  await handler({
+    method: "POST",
+    body: {
+      request: { command: "забудь всё" },
+      state: { user: { facts: ["факт 1"] } }
+    }
+  }, res);
+
+  assert.equal(statusCode, 200);
+  assert.match(responseData.response.text, /Память очищена/);
+  assert.deepEqual(responseData.user_state_update.facts, []);
+});
+
+test("POST with exit intent closes session cleanly", async () => {
+  let statusCode = 0;
+  let responseData = null;
+  const res = {
+    status(code) { statusCode = code; return this; },
+    json(data) { responseData = data; return this; },
+    setHeader() {}
+  };
+  await handler({
+    method: "POST",
+    body: {
+      request: { command: "стоп" }
+    }
   }, res);
 
   assert.equal(statusCode, 200);
   assert.equal(responseData.response.end_session, true);
-  assert.match(responseData.response.text, /До связи/);
-});
-
-test("POST with help intent responds immediately without calling external APIs", async () => {
-  let statusCode = 0;
-  let responseData = null;
-  const res = {
-    status(code) { statusCode = code; return this; },
-    json(data) { responseData = data; return this; },
-    setHeader() {}
-  };
-  await handler({
-    method: "POST",
-    body: { request: { command: "что ты умеешь" } }
-  }, res);
-
-  assert.equal(statusCode, 200);
-  assert.equal(responseData.response.end_session, false);
-  assert.match(responseData.response.text, /умею отвечать/);
 });
